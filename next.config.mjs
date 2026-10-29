@@ -1,11 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  /* config options here */
   experimental: {
     agentFeedback: true,
   },
-  cacheComponents: true,
-  partialPrefetching: true,
+  // Highly dynamic auth/wallet/tournament app — avoid strict instant prerender
+  cacheComponents: false,
   turbopack: {
     rules: {
       "*.css": {

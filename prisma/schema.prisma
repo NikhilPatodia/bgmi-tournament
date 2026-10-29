@@ -1,0 +1,310 @@
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+// ----------------------------------------------------
+// 1. AUTH & USER IDENTITY
+// ----------------------------------------------------
+
+enum Role {
+  USER
+  HOST
+  ADMIN
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String
+  email         String    @unique
+  emailVerified Boolean   @default(false)
+  image         String?
+  role          Role      @default(USER)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // BGMI In-Game Identity
+  bgmiIgn       String?   // In-Game Name (e.g., "Mortal_OP")
+  bgmiId        String?   @unique // 10-digit Character ID
+  phone         String?   @unique
+
+  // Dual Wallet Architecture (Anti-Arbitrage & Clean Auditing)
+  depositBalance  Decimal @default(0.00) @db.Decimal(10, 2) // Usable ONLY for match entry fees
+  winningBalance  Decimal @default(0.00) @db.Decimal(10, 2) // Usable for entry fees OR withdrawals
+
+  // Better Auth Relations
+  sessions      Session[]
+  accounts      Account[]
+
+  // Platform Relations
+  hostedTournaments       Tournament[]             @relation("TournamentHost")
+  tournamentRegistrations TournamentRegistration[]
+  slotMemberships         RegistrationMember[]
+  walletTransactions      WalletTransaction[]
+  withdrawalRequests      WithdrawalRequest[]
+
+  @@map("user")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id @default(cuid())
+  userId                String
+  accountId             String
+  providerId            String
+  accessToken           String?
+  refreshToken          String?
+  accessTokenExpiresAt DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  idToken               String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("verification")
+}
+
+// ----------------------------------------------------
+// 2. TOURNAMENTS
+// ----------------------------------------------------
+
+enum MatchMode {
+  SOLO
+  DUO
+  SQUAD
+}
+
+enum MatchMap {
+  ERANGEL
+  MIRAMAR
+  SANHOK
+  VIKENDI
+}
+
+enum TournamentStatus {
+  UPCOMING
+  REGISTRATION_CLOSED
+  CREDENTIALS_RELEASED
+  LIVE
+  COMPLETED
+  CANCELLED
+}
+
+model Tournament {
+  id             String           @id @default(cuid())
+  title          String
+  description    String?          @db.Text
+  bannerUrl      String?
+  mode           MatchMode        @default(SQUAD)
+  map            MatchMap         @default(ERANGEL)
+  status         TournamentStatus @default(UPCOMING)
+
+  // Scheduling & Access Control
+  startTime      DateTime
+  releaseTime    DateTime?        // Exact timestamp when credentials become readable
+
+  // Slots
+  maxSlots       Int              // e.g., 25 teams or 100 solos
+  filledSlots    Int              @default(0)
+
+  // Financials
+  entryFee       Decimal          @default(0.00) @db.Decimal(10, 2)
+  grossPrizePool Decimal          @default(0.00) @db.Decimal(10, 2)
+  platformFeePct Decimal          @default(10.00) @db.Decimal(5, 2)
+  netPrizePool   Decimal          @default(0.00) @db.Decimal(10, 2)
+  
+  // Custom Prize Structure (Flexible JSON: e.g., {"rank1": 800, "rank2": 400, "perKill": 20})
+  prizeBreakdown Json?
+
+  // Credentials (Expose only when status == CREDENTIALS_RELEASED or now() >= releaseTime)
+  customRoomId   String?
+  customRoomPass String?
+
+  // Host Details
+  hostId         String
+  host           User             @relation("TournamentHost", fields: [hostId], references: [id], onDelete: Cascade)
+  isOfficial     Boolean          @default(false)
+
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  registrations  TournamentRegistration[]
+  results        TournamentResult[]
+
+  @@index([status, startTime])
+  @@map("tournament")
+}
+
+// ----------------------------------------------------
+// 3. REGISTRATIONS & ROSTER MEMBERS
+// ----------------------------------------------------
+
+enum RegistrationStatus {
+  PENDING_VERIFICATION
+  CONFIRMED
+  CANCELLED
+  DISQUALIFIED
+  REFUNDED
+}
+
+model TournamentRegistration {
+  id           String             @id @default(cuid())
+  tournamentId String
+  userId       String             // Captain / Registrar
+  slotNumber   Int                // 1 to 25 (or 100)
+  teamName     String?
+  status       RegistrationStatus @default(CONFIRMED)
+  amountPaid   Decimal            @db.Decimal(10, 2)
+  paymentUtr   String?
+  paymentProof String?            @db.Text
+  createdAt    DateTime           @default(now())
+
+  tournament   Tournament         @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  members      RegistrationMember[]
+  result       TournamentResult?
+
+  @@unique([tournamentId, slotNumber])
+  @@unique([tournamentId, userId]) // Prevents captain from taking multiple slots in the same match
+  @@index([tournamentId])
+  @@map("tournament_registration")
+}
+
+model RegistrationMember {
+  id             String                 @id @default(cuid())
+  registrationId String
+  userId         String?
+  ign            String
+  bgmiId         String                 // 10-digit character ID
+  isCaptain      Boolean                @default(false)
+
+  registration   TournamentRegistration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+  user           User?                  @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([registrationId])
+  @@index([bgmiId])
+  @@map("registration_member")
+}
+
+// ----------------------------------------------------
+// 4. RESULTS & AUDITING
+// ----------------------------------------------------
+
+model TournamentResult {
+  id              String                 @id @default(cuid())
+  tournamentId    String
+  registrationId  String                 @unique
+  rank            Int
+  kills           Int                    @default(0)
+  placementPoints Int                    @default(0)
+  killPoints      Int                    @default(0)
+  totalPoints     Int                    @default(0)
+  prizeWon        Decimal                @default(0.00) @db.Decimal(10, 2)
+  isMvp           Boolean                @default(false)
+  proofScreenshot String?                // URL to verified score screenshot
+
+  tournament      Tournament             @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  registration    TournamentRegistration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+
+  @@index([tournamentId, rank])
+  @@map("tournament_result")
+}
+
+// ----------------------------------------------------
+// 5. LEDGER & PAYOUTS
+// ----------------------------------------------------
+
+enum TransactionType {
+  DEPOSIT
+  WITHDRAWAL_REQUEST
+  WITHDRAWAL_REFUND
+  ENTRY_FEE
+  ENTRY_REFUND
+  PRIZE_PAYOUT
+  HOST_COMMISSION
+}
+
+enum TransactionStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+model WalletTransaction {
+  id               String            @id @default(cuid())
+  userId           String
+  amount           Decimal           @db.Decimal(10, 2) // Positive for credit, negative for debit
+  balanceAfter     Decimal?          @db.Decimal(10, 2) // Snapshot balance for easy audit reconciliation
+  type             TransactionType
+  status           TransactionStatus @default(SUCCESS)
+  
+  // External or Internal tracking
+  gatewayPaymentId String?           @unique // legacy gateway id, unused for manual UPI
+  referenceId      String?           // e.g., tournamentId or withdrawalRequestId
+  utrNumber        String?
+  proofScreenshot  String?           @db.Text
+  note             String?
+  createdAt        DateTime          @default(now())
+
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("wallet_transaction")
+}
+
+enum WithdrawalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  PROCESSED
+}
+
+model WithdrawalRequest {
+  id            String           @id @default(cuid())
+  userId        String
+  amount        Decimal          @db.Decimal(10, 2)
+  upiId         String           // Player's VPA (e.g., username@okhdfcbank)
+  status        WithdrawalStatus @default(PENDING)
+  adminNote     String?
+  utrNumber     String?          // Bank UTR reference after manual UPI transfer
+  processedAt   DateTime?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@map("withdrawal_request")
+}
